@@ -1,41 +1,111 @@
-#include "interface.h"
 #include "appframework/IAppSystem.h"
-#include "icvar.h"
+#include "eiface.h"
+#include "icommandline.h"
+#include "interface.h"
+#include "interfaces/interfaces.h"
+#include "vscript/ivscript.h"
+#include <cstring>
 
-ICvar* g_pCVar = NULL;
 CreateInterfaceFn g_pfnServerCreateInterface = NULL;
+
+bool(*g_pfnServerConfigConnect)(IAppSystem* appSystem, CreateInterfaceFn factory);
+float(*g_pfnServerConfigGetTickInterval)(const ISource2ServerConfig* config);
+void(*g_pfnServerConfigGetPlayerLimits)(int &minplayers, int &maxplayers, int &defaultMaxPlayers, bool &bIsMultiplayer);
+
+IScriptVM* (*g_pfnScriptManagerCreateVM)(IScriptManager* manager, ScriptLanguage_t language);
+
+void (*g_pfnNetworkServerStartupServer)(const GameSessionConfiguration_t &config, ISource2WorldSession *pWorldSession, const char*);
 
 extern ConCommand cvar_unhide;
 extern ConCommand cvarlist_md;
 
-typedef bool (*AppSystemConnectFn)(IAppSystem* appSystem, CreateInterfaceFn factory);
-static AppSystemConnectFn g_pfnServerConfigConnect = NULL;
+template<typename ReturnType, typename ...ArgTypes>
+static auto PatchVtable(void* object, size_t index, ReturnType(*hook)(ArgTypes...))
+{
+	const auto** vtable = *(const void***)object;
+
+	DWORD oldProtect;
+	if (!VirtualProtect(vtable, sizeof(void*), PAGE_EXECUTE_READWRITE, &oldProtect))
+	{
+		Plat_FatalError("VirtualProtect PAGE_EXECUTE_READWRITE failed: %d", GetLastError());
+	}
+
+	const auto original = (decltype(hook))vtable[index];
+	vtable[index] = hook;
+
+	if (!VirtualProtect(vtable, sizeof(void*), oldProtect, &oldProtect))
+	{
+		Plat_FatalError("VirtualProtect restore failed: %d", GetLastError());
+	}
+
+	return original;
+}
+
+static IScriptVM* CreateVM(IScriptManager* manager, ScriptLanguage_t language)
+{
+   	return g_pfnScriptManagerCreateVM(manager, SL_LUA);
+}
 
 bool Connect(IAppSystem* appSystem, CreateInterfaceFn factory)
 {
-	auto result = g_pfnServerConfigConnect(appSystem, factory);
+	const bool result = g_pfnServerConfigConnect(appSystem, factory);
 
-	g_pCVar = (ICvar*)factory("VEngineCvar007", NULL);
-	ConVar_Register();
+	ConnectInterfaces(&factory, 1);
+
+	ConVar_Register(FCVAR_RELEASE | FCVAR_GAMEDLL);
+
+    if (g_pScriptManager)
+    {
+        g_pfnScriptManagerCreateVM = PatchVtable(g_pScriptManager, 0, CreateVM);
+    }
 
 	return result;
 }
+
+float GetTickInterval(const ISource2ServerConfig* config)
+{
+	if (CommandLine()->CheckParm("-tickrate"))
+	{
+		const int tickrate = CommandLine()->ParmValue("-tickrate", 0);
+		if (tickrate > 10)
+			return 1.0f / tickrate;
+	}
+
+	return g_pfnServerConfigGetTickInterval(config);
+}
+
+void GetPlayerLimits(int &minplayers, int &maxplayers, int &defaultMaxPlayers, bool &bIsMultiplayer)
+{
+    if (CommandLine()->CheckParm("-maxplayersoverride")) {
+        const int newMaxPlayers = CommandLine()->ParmValue("-maxplayersoverride", 0);
+        if (newMaxPlayers > 1)
+        {
+            minplayers = 1;
+            maxplayers = newMaxPlayers;
+            defaultMaxPlayers = newMaxPlayers;
+            bIsMultiplayer = true;
+            return;
+        }
+    }
+
+    return g_pfnServerConfigGetPlayerLimits(minplayers, maxplayers, defaultMaxPlayers, bIsMultiplayer);
+}
+
+#undef CreateInterface
 
 DLL_EXPORT void* CreateInterface(const char* pName, int* pReturnCode)
 {
 	if (g_pfnServerCreateInterface == NULL)
 	{
-		// Engine should stop joining VAC-secured servers with a modified gameinfo,
-		// this is to be extra cautious.
 		auto insecure = CommandLine()->HasParm("-insecure");
 		if (!insecure)
 		{
-			Plat_FatalErrorFunc("Refusing to load cvar-unhide-s2 in secure mode.\n\nAdd -insecure to Counter-Strike's launch options and restart the game.");
+			Plat_FatalError("Refusing to load the cvar unlocker in secure mode.\n\nAdd -insecure to Deadlock's launch options and restart the game.");
 		}
 
 		// Generate the path to the real server.dll
 		CUtlString realServerPath(Plat_GetGameDirectory());
-		realServerPath.Append("\\csgo\\bin\\win64\\server.dll");
+		realServerPath.Append("\\citadel\\bin\\win64\\server.dll");
 		realServerPath.FixSlashes();
 
 		HMODULE serverModule = LoadLibrary(realServerPath.GetForModify());
@@ -43,33 +113,24 @@ DLL_EXPORT void* CreateInterface(const char* pName, int* pReturnCode)
 
 		if (g_pfnServerCreateInterface == NULL)
 		{
-			Plat_FatalErrorFunc("Could not find CreateInterface entrypoint in server.dll: %d", GetLastError());
+			Plat_FatalError("Could not find CreateInterface entrypoint in server.dll: %d", GetLastError());
 		}
 	}
 
 	auto original = g_pfnServerCreateInterface(pName, pReturnCode);
 
 	// Intercept the first interface requested by the engine
-	if (strcmp(pName, "Source2ServerConfig001") == 0)
+	if (strcmp(pName, INTERFACEVERSION_SERVERCONFIG) == 0)
 	{
-		auto vtable = *(void***)original;
-
-		DWORD oldProtect = 0;
-		if (!VirtualProtect(vtable, sizeof(void**), PAGE_EXECUTE_READWRITE, &oldProtect))
-		{
-			Plat_FatalErrorFunc("VirtualProtect PAGE_EXECUTE_READWRITE failed: %d", GetLastError());
-		}
-
-		// Intercept the Connect virtual method
-		g_pfnServerConfigConnect = (AppSystemConnectFn)vtable[0];
-		vtable[0] = &Connect;
-
-		DWORD ignore = 0;
-		if (!VirtualProtect(vtable, sizeof(void**), oldProtect, &ignore))
-		{
-			Plat_FatalErrorFunc("VirtualProtect restore failed: %d", GetLastError());
-		}
+		g_pfnServerConfigConnect = PatchVtable(original, 0, Connect);
+		g_pfnServerConfigGetTickInterval = PatchVtable(original, 13, GetTickInterval);
+		g_pfnServerConfigGetPlayerLimits = PatchVtable(original, 14, GetPlayerLimits);
 	}
+
+    if (strcmp(pName, NETWORKSERVERSERVICE_INTERFACE_VERSION) == 0)
+    {
+        // todo
+    }
 
 	return original;
 }

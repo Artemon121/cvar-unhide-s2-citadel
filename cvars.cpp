@@ -4,6 +4,22 @@
 #include <sstream>
 #include <fstream>
 #include <vector>
+#include <cctype>
+
+bool IsValidName(const char* pszName) {
+	if (!pszName)
+		return false;
+	for (const char* p = pszName; *p != '\0'; p++) {
+		unsigned char c = *p;
+		if (c > 127) {
+			return false;
+		}
+		if (!std::isalnum(c) && c != '-' && c != '+' && c != '_' && c != '@') {
+			return false;
+		}
+	}
+	return true;
+}
 
 CON_COMMAND(cvar_unhide, "")
 {
@@ -18,8 +34,10 @@ CON_COMMAND(cvar_unhide, "")
 	{
 		cmdHandle = ConCommandRef(cmdIdx++);
 		auto concmd = g_pCVar->GetConCommandData(cmdHandle);
-		if (concmd == invalidConcmd)
+		if (!concmd || concmd == invalidConcmd)
 			break;
+		if (!IsValidName(concmd->GetName()) || !concmd->GetHelpText())
+			continue;
 
 		if (concmd->GetFlags() & flagsToRemove)
 		{
@@ -37,8 +55,10 @@ CON_COMMAND(cvar_unhide, "")
 	{
 		cvarHandle = ConVarRef(cvarIdx++);
 		auto convar = g_pCVar->GetConVarData(cvarHandle);
-		if (convar == invalidCvar)
+		if (!convar || convar == invalidCvar)
 			break;
+		if (!IsValidName(convar->GetName()) || !convar->GetHelpText())
+			continue;
 
 		if (convar->GetFlags() & flagsToRemove)
 		{
@@ -66,11 +86,11 @@ void string_replace(std::string& data, std::string toSearch, std::string replace
 }
 struct ConEntry_t
 {
-	ConEntry_t() : pszName(nullptr), defaultValue(nullptr), conVarType(EConVarType_Invalid), flags(0), pszDescription(nullptr)
+	ConEntry_t() : pszName(nullptr), defaultValue(nullptr), conVarType(EConVarType_Invalid), flags(0), pszDescription(nullptr), isCvar(false)
 	{
 	}
 
-	ConEntry_t(const char* pszName, const CVValue_t* defaultValue, EConVarType conVarType, int flags, const char* pszDescription) : pszName(pszName), defaultValue(defaultValue), conVarType(conVarType), flags(flags), pszDescription(pszDescription)
+	ConEntry_t(const char* pszName, const CVValue_t* defaultValue, EConVarType conVarType, int flags, const char* pszDescription, bool isCvar) : pszName(pszName), defaultValue(defaultValue), conVarType(conVarType), flags(flags), pszDescription(pszDescription), isCvar(isCvar)
 	{
 	}
 
@@ -79,6 +99,7 @@ struct ConEntry_t
 	EConVarType conVarType;
 	int flags;
 	const char* pszDescription;
+	bool isCvar;
 };
 
 std::string FormatCVValue(const CVValue_t& value, EConVarType type) {
@@ -223,7 +244,7 @@ std::string MarkdownEscape(const std::string& str)
 	return escaped;
 }
 
-CON_COMMAND(cvarlist_md, "List all convars/concmds in Markdown format. Format: [hidden]")
+CON_COMMAND(cvarlist_md, "List all convars/concmds in Markdown format.")
 {
 	std::map<std::string, ConEntry_t> allEntries;
 
@@ -234,10 +255,12 @@ CON_COMMAND(cvarlist_md, "List all convars/concmds in Markdown format. Format: [
 	{
 		cmdHandle = ConCommandRef(cmdIdx++);
 		auto concmd = g_pCVar->GetConCommandData(cmdHandle);
-		if (concmd == invalidConcmd)
+		if (!concmd || concmd == invalidConcmd)
 			break;
+		if (!IsValidName(concmd->GetName()) || !concmd->GetHelpText())
+			continue;
 
-		allEntries[concmd->GetName()] = ConEntry_t(concmd->GetName(), nullptr, EConVarType_Invalid, concmd->GetFlags(), concmd->GetHelpText());
+		allEntries[concmd->GetName()] = ConEntry_t(concmd->GetName(), nullptr, EConVarType_Invalid, concmd->GetFlags(), concmd->GetHelpText(), false);
 	}
 
 	ConVarRef cvarHandle{};
@@ -247,22 +270,25 @@ CON_COMMAND(cvarlist_md, "List all convars/concmds in Markdown format. Format: [
 	{
 		cvarHandle = ConVarRef(cvarIdx++);
 		auto convar = g_pCVar->GetConVarData(cvarHandle);
-		if (convar == invalidCvar)
+		if (!convar || convar == invalidCvar)
 			break;
+		if (!IsValidName(convar->GetName()) || !convar->GetHelpText())
+			continue;
 
-		allEntries[convar->GetName()] = ConEntry_t(convar->GetName(), convar->DefaultValue(), convar->GetType(), convar->GetFlags(), convar->GetHelpText());
+		allEntries[convar->GetName()] = ConEntry_t(convar->GetName(), convar->DefaultValue(), convar->GetType(), convar->GetFlags(), convar->GetHelpText(), true);
 	}
 
-	auto bShowHidden = !V_stricmp(args.Arg(1), "hidden");
+	//auto bShowHidden = !V_stricmp(args.Arg(1), "hidden");
+	bool bShowHidden = true;
 
 	CUtlString outputPath(Plat_GetGameDirectory());
-	outputPath.Append("\\csgo\\cvarlist.md");
+	outputPath.Append("\\citadel\\cvarlist.md");
 	outputPath.FixSlashes();
 
 	std::ofstream file(outputPath.GetForModify());
 
-	file << "Name | Flags | Description\n";
-	file << "---- | ----- | -----------\n";
+	file << "Name | Description | Default Value | Flags\n";
+	file << "---- | ----------- | ------------- | -----\n";
 
 	int nWritten = 0;
 	for (auto& pair : allEntries)
@@ -270,21 +296,26 @@ CON_COMMAND(cvarlist_md, "List all convars/concmds in Markdown format. Format: [
 		const std::string& name = pair.first;
 		auto cmd = pair.second;
 
+		if (name == "cvar_unhide" || name == "cvarlist_md")
+			continue;
+
 		if (!bShowHidden && (cmd.flags & (FCVAR_DEVELOPMENTONLY | FCVAR_HIDDEN | FCVAR_DEFENSIVE)))
 			continue;
+
+		auto defaultValue = std::string();
+		if (!cmd.isCvar)
+		{
+			defaultValue = std::string("cmd");
+		}
+		else if (cmd.defaultValue != nullptr)
+		{
+			defaultValue = MarkdownEscape(FormatCVValue(*cmd.defaultValue, cmd.conVarType));
+		}
 
 		auto flagsStr = ConvarFlagsString(cmd.flags);
 		auto helpText = MarkdownEscape(cmd.pszDescription);
 
-		file << name << " | " << flagsStr << " | ";
-		
-		if (cmd.defaultValue != nullptr)
-		{
-			auto defaultValue = MarkdownEscape(FormatCVValue(*cmd.defaultValue, cmd.conVarType));
-			file << "Default: " << defaultValue << "<br>";
-		}
-		
-		file << helpText << "\n";
+		file << name << " | " << helpText << " | " << defaultValue << " | " << flagsStr << "\n";
 		nWritten++;
 	}
 

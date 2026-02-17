@@ -1,8 +1,23 @@
-.vs
+# Xmake cache
+.xmake/
+build/
+
+# clangd cache
+.cache/
+
+# MacOS Cache
+.DS_Store
+
+# Project Files
+/.vs/
+/vsxmake2022/
+/vsxmake2026/
+/compile_commands.json
 *.user
+
+# Output
 Debug/
 Release/
 x64/
 *.dll
-hl2sdk/
 addons/
