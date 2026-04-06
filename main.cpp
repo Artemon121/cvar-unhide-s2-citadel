@@ -3,16 +3,12 @@
 #include "icommandline.h"
 #include "interface.h"
 #include "interfaces/interfaces.h"
-#include "vscript/ivscript.h"
 #include <cstring>
 
 CreateInterfaceFn g_pfnServerCreateInterface = NULL;
 
 bool(*g_pfnServerConfigConnect)(IAppSystem* appSystem, CreateInterfaceFn factory);
 float(*g_pfnServerConfigGetTickInterval)(const ISource2ServerConfig* config);
-void(*g_pfnServerConfigGetPlayerLimits)(int &minplayers, int &maxplayers, int &defaultMaxPlayers, bool &bIsMultiplayer);
-
-IScriptVM* (*g_pfnScriptManagerCreateVM)(IScriptManager* manager, ScriptLanguage_t language);
 
 void (*g_pfnNetworkServerStartupServer)(const GameSessionConfiguration_t &config, ISource2WorldSession *pWorldSession, const char*);
 
@@ -41,11 +37,6 @@ static auto PatchVtable(void* object, size_t index, ReturnType(*hook)(ArgTypes..
 	return original;
 }
 
-static IScriptVM* CreateVM(IScriptManager* manager, ScriptLanguage_t language)
-{
-   	return g_pfnScriptManagerCreateVM(manager, SL_LUA);
-}
-
 bool Connect(IAppSystem* appSystem, CreateInterfaceFn factory)
 {
 	const bool result = g_pfnServerConfigConnect(appSystem, factory);
@@ -53,11 +44,6 @@ bool Connect(IAppSystem* appSystem, CreateInterfaceFn factory)
 	ConnectInterfaces(&factory, 1);
 
 	ConVar_Register(FCVAR_RELEASE | FCVAR_GAMEDLL);
-
-    if (g_pScriptManager)
-    {
-        g_pfnScriptManagerCreateVM = PatchVtable(g_pScriptManager, 0, CreateVM);
-    }
 
 	return result;
 }
@@ -72,23 +58,6 @@ float GetTickInterval(const ISource2ServerConfig* config)
 	}
 
 	return g_pfnServerConfigGetTickInterval(config);
-}
-
-void GetPlayerLimits(int &minplayers, int &maxplayers, int &defaultMaxPlayers, bool &bIsMultiplayer)
-{
-    if (CommandLine()->CheckParm("-maxplayersoverride")) {
-        const int newMaxPlayers = CommandLine()->ParmValue("-maxplayersoverride", 0);
-        if (newMaxPlayers > 1)
-        {
-            minplayers = 1;
-            maxplayers = newMaxPlayers;
-            defaultMaxPlayers = newMaxPlayers;
-            bIsMultiplayer = true;
-            return;
-        }
-    }
-
-    return g_pfnServerConfigGetPlayerLimits(minplayers, maxplayers, defaultMaxPlayers, bIsMultiplayer);
 }
 
 #undef CreateInterface
@@ -124,13 +93,7 @@ DLL_EXPORT void* CreateInterface(const char* pName, int* pReturnCode)
 	{
 		g_pfnServerConfigConnect = PatchVtable(original, 0, Connect);
 		g_pfnServerConfigGetTickInterval = PatchVtable(original, 13, GetTickInterval);
-		g_pfnServerConfigGetPlayerLimits = PatchVtable(original, 14, GetPlayerLimits);
 	}
-
-    if (strcmp(pName, NETWORKSERVERSERVICE_INTERFACE_VERSION) == 0)
-    {
-        // todo
-    }
 
 	return original;
 }

@@ -14,7 +14,7 @@ bool IsValidName(const char* pszName) {
 		if (c > 127) {
 			return false;
 		}
-		if (!std::isalnum(c) && c != '-' && c != '+' && c != '_' && c != '@') {
+		if (!std::isalnum(c) && c != '-' && c != '+' && c != '_' && c != '@' && c != '.') {
 			return false;
 		}
 	}
